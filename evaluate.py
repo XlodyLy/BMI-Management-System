@@ -1,52 +1,79 @@
-
+import argparse
 import os
 import numpy as np
 from stable_baselines3 import PPO
-from bmi_env import BMIMgmtEnv
+from bmi_env.env import BMIMgmtEnv
 
-MODEL_PATH = os.path.join("models", "ppo_bmi.zip")
+np.set_printoptions(precision=2, suppress=True)
 
-def run_episode(env, model, deterministic=True):
-    obs, info = env.reset()
-    total_reward = 0.0
-    steps = 0
-    terminated = False
-    truncated = False
+# Define labels for each state dimension (based on dataset columns)
+STATE_LABELS = [
+    "Age", "Gender", "BMI", "Calories", "Sleep Hours",
+    "Alcohol", "Smoking", "Blood Pressure", "Fitness Level",
+    "Family History", "Activity Type"
+]
 
-    while not (terminated or truncated):
-        action, _ = model.predict(obs, deterministic=deterministic)
-        obs, reward, terminated, truncated, info = env.step(int(action))
-        total_reward += reward
-        steps += 1
+def pretty_state(state):
+    """Format state values with labels for readability."""
+    return {label: round(val, 2) for label, val in zip(STATE_LABELS, state)}
 
-    success = info.get("is_success", 0.0)
-    final_bmi = float(obs[2])
-    return total_reward, steps, success, final_bmi
+def evaluate(model_path: str, csv_path: str = "dataset.csv", episodes: int = 10, render: bool = False):
+    if not os.path.exists(model_path + ".zip"):
+        raise FileNotFoundError(f"Model not found at {model_path}. Did you train and save it?")
 
-def main():
-    if not os.path.exists(MODEL_PATH):
-        print("Model not found. Train first by running: python train.py")
-        return
+    print(f"Loading model from {model_path} ...")
+    model = PPO.load(model_path)
 
-    model = PPO.load(MODEL_PATH)
-    env = BMIMgmtEnv(max_days=56, seed=123)
+    env = BMIMgmtEnv(csv_path=csv_path)
 
-    num_episodes = 1000
-    rewards, successes, finals = [], [], []
+    all_rewards = []
+    success_count = 0
+    final_states = []
 
-    for ep in range(num_episodes):
-        ep_rew, ep_len, success, final_bmi = run_episode(env, model)
-        rewards.append(ep_rew)
-        successes.append(success)
-        finals.append(final_bmi)
-        print(f"Episode {ep+1:02d}: reward={ep_rew:.2f}, len={ep_len}, success={success:.0f}, final BMI={final_bmi:.2f}")
+    for ep in range(episodes):
+        obs, _ = env.reset()
+        done, truncated = False, False
+        total_reward = 0.0
+        step_count = 0
 
-    success_rate = 100.0 * float(np.mean(successes)) if successes else 0.0
-    print("\n=== Evaluation Summary ===")
-    print(f"Episodes:       {num_episodes}")
-    print(f"Avg Reward:     {np.mean(rewards):.2f}")
-    print(f"Success Rate:   {success_rate:.1f}%  (BMI within target band at episode end)")
-    print(f"Avg Final BMI:  {np.mean(finals):.2f}")
+        print(f"\n=== Episode {ep+1} ===")
+
+        while not (done or truncated):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            total_reward += reward
+            step_count += 1
+
+            # Print state per step in a readable format
+            print(f"Day {step_count} | State: {pretty_state(obs)}")
+
+            if render:
+                env.render()
+
+        all_rewards.append(total_reward)
+        final_states.append(obs)
+
+        if "is_success" in info and info["is_success"]:
+            success_count += 1
+
+        print(f"\nEpisode {ep+1} Summary | Total Reward: {total_reward:.2f} | Success: {info.get('is_success', 0)}")
+
+    avg_reward = np.mean(all_rewards)
+    success_rate = success_count / episodes
+    avg_final_state = np.mean(final_states, axis=0)
+
+    print("\n=== Evaluation Results ===")
+    print(f"Average Reward (Reward Rate): {avg_reward:.2f}")
+    print(f"Success Rate: {success_rate * 100:.1f}% ({success_count}/{episodes})")
+    print("Average Final State:", pretty_state(avg_final_state))
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True, help="Path to saved PPO model (without .zip extension)")
+    parser.add_argument("--csv", type=str, default="dataset.csv", help="Path to dataset CSV file")
+    parser.add_argument("--episodes", type=int, default=10, help="Number of evaluation episodes")
+    parser.add_argument("--render", action="store_true", help="Render environment states")
+
+    args = parser.parse_args()
+
+    evaluate(model_path=args.model, csv_path=args.csv, episodes=args.episodes, render=args.render)

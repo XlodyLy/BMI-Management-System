@@ -1,47 +1,74 @@
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import pandas as pd
+import os
 
 class BMIMgmtEnv(gym.Env):
-    """
-    A custom environment simulating lifestyle management for high-risk cardiovascular patients.
-    Observation: [Age, Gender, BMI, Exercise(E), Diet(D), Sleep(S), MissedMeals(M), JunkFood(F), MissedExercise(P)]
-    Discrete actions (7): exercise & lifestyle suggestions.
-    Reward per step (day): R = α(-ΔBMI) + βE + γD + δ(S/9) - θM - κF - λP
-    Episode is truncated at a max number of days or terminated if BMI goes out of safe bounds.
-    """
     metadata = {"render_modes": []}
 
     def __init__(self,
-                 max_days: int = 56,          # simulate 8 weeks
+                 csv_path: str = "dataset.csv",   # default
+                 max_days: int = 56,
                  target_bmi_low: float = 22.0,
                  target_bmi_high: float = 27.0,
                  seed: int | None = None):
         super().__init__()
         self.rng = np.random.default_rng(seed)
 
-        # Observation space: Age, Gender(0/1), BMI, E, D, S, M, F, P
-        low = np.array([40, 0, 15.0, 0.0, 0.0, 0.0, 0, 0, 0], dtype=np.float32)
-        high = np.array([70, 1, 45.0, 1.0, 1.0, 12.0, 5, 7, 7], dtype=np.float32)
+        # Resolve path relative to project root
+        if not os.path.isabs(csv_path):
+            csv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), csv_path)
+
+        # Load dataset
+        self.data = pd.read_csv(csv_path)
+
+        # --- Light cleaning to prevent NaNs/infs later ---
+        # Ensure required columns exist
+        required_cols = [
+            "age","gender","bmi","daily_steps","hours_sleep","stress_level",
+            "activity_type","blood_pressure_systolic","blood_pressure_diastolic",
+            "smoking_status","fitness_level","intensity","health_condition"
+        ]
+        missing = [c for c in required_cols if c not in self.data.columns]
+        if missing:
+            raise ValueError(f"CSV missing required columns: {missing}")
+
+        # Encode categorical values
+        self.data["gender"] = self.data["gender"].map({"M": 1, "F": 0})
+        self.data["intensity"] = self.data["intensity"].map({"Low": 0, "Medium": 1, "High": 2})
+        self.data["smoking_status"] = self.data["smoking_status"].map({"Never": 0, "Former": 1, "Current": 2})
+        self.data["health_condition"] = self.data["health_condition"].map({"None": 0, "Hypertension": 1, "Diabetes": 2})
+
+        # Encode activity type (map for simplicity)
+        self.data["activity_type"] = self.data["activity_type"].fillna("Unknown")
+        unique_activities = {name: i for i, name in enumerate(self.data["activity_type"].unique())}
+        self.data["activity_type"] = self.data["activity_type"].map(unique_activities)
+
+        # Coerce numeric columns and fill remaining NaNs with sensible medians
+        num_cols = [
+            "age","bmi","daily_steps","hours_sleep","stress_level",
+            "activity_type","blood_pressure_systolic","blood_pressure_diastolic",
+            "smoking_status","fitness_level","gender"
+        ]
+        for c in num_cols:
+            self.data[c] = pd.to_numeric(self.data[c], errors="coerce")
+        self.data[num_cols] = self.data[num_cols].fillna(self.data[num_cols].median(numeric_only=True))
+
+        # Observation space:
+        # [age, gender, bmi, daily_steps, hours_sleep, stress_level,
+        #  activity_type, systolic_bp, diastolic_bp, smoking_status, fitness_level]
+        n_act_vals = max(1, len(unique_activities))
+        low = np.array([18, 0, 15.0, 0, 0, 0, 0, 80, 40, 0, 0], dtype=np.float32)
+        high = np.array([80, 1, 45.0, 30000, 12, 10, n_act_vals - 1, 200, 120, 2, 5], dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
-        # Actions: 0..6
+        # Actions
         self.action_space = spaces.Discrete(7)
 
-        # Config
         self.max_days = max_days
         self.target_bmi_low = target_bmi_low
         self.target_bmi_high = target_bmi_high
-
-        # Reward weights (tunable)
-        self.alpha = 5.0   # scales -ΔBMI
-        self.beta  = 1.0   # E
-        self.gamma = 0.7   # D
-        self.delta = 0.3   # S/9
-        self.theta = 0.2   # M
-        self.kappa = 0.25  # F
-        self.lmbda = 0.25  # P
 
         self.state = None
         self.day = 0
@@ -49,116 +76,147 @@ class BMIMgmtEnv(gym.Env):
     def seed(self, seed: int | None = None):
         self.rng = np.random.default_rng(seed)
 
-    def _random_patient(self):
-        age = self.rng.integers(40, 71)
-        gender = self.rng.integers(0, 2)  # 0/1
-        bmi = self.rng.uniform(26.0, 34.0)  # start slightly overweight
-        E = 0.0
-        D = float(self.rng.choice([0.0, 0.5]))
-        S = float(self.rng.uniform(5.5, 8.5))
-        M = float(self.rng.integers(0, 2))
-        F = float(self.rng.integers(0, 3))
-        P = float(self.rng.integers(0, 3))
-        return np.array([age, gender, bmi, E, D, S, M, F, P], dtype=np.float32)
+    def _sample_patient(self):
+        row = self.data.sample(1, random_state=int(self.rng.integers(1_000_000))).iloc[0]
+        obs = np.array([
+            row["age"],
+            row["gender"],
+            row["bmi"],
+            row["daily_steps"],
+            row["hours_sleep"],
+            row["stress_level"],
+            row["activity_type"],
+            row["blood_pressure_systolic"],
+            row["blood_pressure_diastolic"],
+            row["smoking_status"],
+            row["fitness_level"]
+        ], dtype=np.float32)
+
+        # Clip to space & replace non-finite
+        obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
+        obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        return obs
 
     def reset(self, *, seed: int | None = None, options=None):
         if seed is not None:
             self.seed(seed)
-        self.state = self._random_patient()
+        self.state = self._sample_patient()
         self.day = 0
         info = {}
         return self.state.copy(), info
 
     def step(self, action: int):
         assert self.action_space.contains(action), "Invalid action."
-        age, gender, bmi, E, D, S, M, F, P = self.state
 
-        # Compliance probability increases with existing good habits
-        compliance = np.clip(0.55 + 0.3*E + 0.15*D, 0.2, 0.95)
-        did_comply = self.rng.random() < compliance
+        # unpack state
+        (age, gender, bmi, steps, sleep, stress,
+         activity, sys_bp, dia_bp, smoking, fitness) = self.state
 
-        # Natural habit decay (if not worked on)
-        E = max(0.0, E - 0.04)
-        D = max(0.0, D - 0.03)
+        # Apply simple action effects
+        if action == 0:   # walking
+            steps += 1000
+            bmi -= 0.02
+            fitness += 0.05
+        elif action == 1: # stretching
+            stress = max(0, float(stress) - 0.5)
+        elif action == 2: # structured exercise
+            steps += 2000
+            bmi -= 0.05
+            fitness += 0.1
+        elif action == 3: # portion control
+            bmi -= 0.03
+        elif action == 4: # high-volume foods
+            bmi -= 0.01
+        elif action == 5: # track calories
+            stress = max(0, float(stress) - 0.2)
+            bmi -= 0.02
+        elif action == 6: # sleep
+            sleep = float(np.clip(float(sleep) + self.rng.normal(0.5, 0.2), 5.0, 10.0))
 
-        # Apply action effects (if complied)
-        if action == 0:   # Light walking
-            if did_comply:
-                E = np.clip(E + 0.25, 0.0, 1.0)
-                P = max(0.0, P - 1.0)
-                bmi -= 0.05
-            else:
-                P = min(7.0, P + 0.5)
-        elif action == 1: # Chair stretching
-            if did_comply:
-                E = np.clip(E + 0.15, 0.0, 1.0)
-                P = max(0.0, P - 0.5)
-        elif action == 2: # Structured exercise
-            if did_comply:
-                E = np.clip(E + 0.35, 0.0, 1.0)
-                P = max(0.0, P - 1.0)
-                bmi -= 0.08
-            else:
-                P = min(7.0, P + 1.0)
-        elif action == 3: # Portion control
-            if did_comply:
-                D = np.clip(D + 0.35, 0.0, 1.0)
-                M = max(0.0, M - 0.5)
-                bmi -= 0.04
-        elif action == 4: # High-volume low-calorie foods
-            if did_comply:
-                D = np.clip(D + 0.25, 0.0, 1.0)
-                F = max(0.0, F - 1.0)
-        elif action == 5: # Track/adjust calories
-            if did_comply:
-                D = np.clip(D + 0.2, 0.0, 1.0)
-                M = max(0.0, M - 1.0)
-                F = max(0.0, F - 0.5)
-        elif action == 6: # Sleep 7-9 hours
-            if did_comply:
-                S = float(np.clip(self.rng.normal(8.0, 0.3), 7.0, 9.0))
-            else:
-                S = float(np.clip(S + self.rng.normal(0.0, 0.5), 5.0, 10.0))
+        # Simulate small blood pressure drift
+        sys_bp = float(np.clip(float(sys_bp) + self.rng.normal(0, 1), 90, 200))
+        dia_bp = float(np.clip(float(dia_bp) + self.rng.normal(0, 1), 60, 120))
 
-        # Lifestyle dynamics affecting BMI (daily)
-        sleep_bonus = -0.02 if 7.0 <= S <= 9.0 else 0.02
-        bmi_change = (
-            -0.08 * E    # exercise reduces BMI
-            -0.05 * D    # good diet reduces BMI
-            + sleep_bonus
-            + 0.01 * F   # junk food increases BMI
-            + 0.005 * P  # missed exercise increases BMI
-            + self.rng.normal(0.0, 0.01)  # noise
-        )
-        new_bmi = float(np.clip(bmi + bmi_change, 15.0, 45.0))
+        # Natural BMI drift
+        bmi = float(np.clip(float(bmi) + self.rng.normal(0.0, 0.01), 15.0, 45.0))
 
-        # Reward: ΔBMI = new - old → negative is good (weighting by alpha)
-        delta_bmi = new_bmi - float(bmi)
-        reward = (
-            self.alpha * (-delta_bmi)
-            + self.beta * E
-            + self.gamma * D
-            + self.delta * (S / 9.0)
-            - self.theta * M
-            - self.kappa * F
-            - self.lmbda * P
-        )
+        # Fitness capped
+        fitness = float(np.clip(float(fitness), 0.0, 5.0))
 
-        # Update state/day
-        self.state = np.array([age, gender, new_bmi, E, D, S, M, F, P], dtype=np.float32)
+        # New state
+        self.state = np.array([
+            age, gender, bmi, steps, sleep, stress,
+            activity, sys_bp, dia_bp, smoking, fitness
+        ], dtype=np.float32)
+
+        # Clip to observation bounds and sanitize
+        self.state = np.clip(self.state, self.observation_space.low, self.observation_space.high)
+        self.state = np.nan_to_num(self.state, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
         self.day += 1
 
-        # Terminate for unsafe BMI; truncate at horizon
-        unsafe = bool(new_bmi < 18.0 or new_bmi > 42.0)
-        terminated = unsafe
-        truncated = self.day >= self.max_days
+        # ------------------------
+        # Reward formula (UPDATED + clipped)
+        # ------------------------
+        epsilon = 1e-6
+
+        # BMI component (target ~24)
+        bmi_score = -abs(float(bmi) - 24.0) / (24.0 + epsilon)
+
+        # Activity component (scaled by activity index)
+        denom_act = max(1.0, float(self.observation_space.high[6]))
+        activity_score = float(activity) / denom_act
+
+        # Blood pressure component (ideal ~120/80)
+        bp_sys_score = -((float(sys_bp) - 120.0) ** 2) / 1000.0
+        bp_dia_score = -((float(dia_bp) - 80.0) ** 2) / 500.0
+
+        # Smoking component
+        # 0=Never, 1=Former, 2=Current
+        smoking_score = -1.0 if int(smoking) == 2 else (-0.5 if int(smoking) == 1 else 0.5)
+
+        # Fitness component
+        fitness_score = float(fitness) / 5.0
+
+        # Steps (scaled)
+        steps_score = float(steps) / 30000.0
+
+        # Stress (penalty)
+        stress_score = -0.1 * float(stress)
+
+        # Sleep bonus
+        sleep_score = 0.5 if 7.0 <= float(sleep) <= 9.0 else 0.0
+
+        # Final weighted reward
+        reward = (
+            0.4 * bmi_score +
+            0.15 * activity_score +
+            0.15 * (bp_sys_score + bp_dia_score) +
+            0.1 * fitness_score +
+            0.1 * steps_score +
+            0.05 * smoking_score +
+            0.05 * stress_score +
+            sleep_score
+        )
+
+        # Clip reward to stabilize learning (prevents huge returns → NaNs)
+        reward = float(np.clip(reward, -5.0, 5.0))
+        if not np.isfinite(reward):
+            reward = 0.0  # last resort safety
+
+        terminated = bool((bmi < 18.0) or (bmi > 42.0))
+        truncated = bool(self.day >= self.max_days)
 
         info = {}
         if terminated or truncated:
-            # success: BMI ended within target band
-            info["is_success"] = float(self.target_bmi_low <= new_bmi <= self.target_bmi_high)
+            info["is_success"] = float(self.target_bmi_low <= float(bmi) <= self.target_bmi_high)
 
-        return self.state.copy(), float(reward), terminated, truncated, info
+        # Final safety assertions (helpful during debugging; cheap)
+        # Comment out if you prefer silent mode.
+        # assert np.all(np.isfinite(self.state)), f"Invalid obs: {self.state}"
+        # assert np.isfinite(reward), f"Invalid reward: {reward}"
+
+        return self.state.copy(), reward, terminated, truncated, info
 
     def render(self):
-        pass
+        print(f"Day {self.day} | State: {self.state}")

@@ -2,6 +2,7 @@ import streamlit as st
 from stable_baselines3 import PPO
 from bmi_env import BMIMgmtEnv
 
+
 # Load trained PPO model
 model = PPO.load("models/ppo_bmi.zip")
 
@@ -10,7 +11,7 @@ st.title("🏥 Intelligent BMI Management System")
 st.write("Enter your health details below and get a personalized daily recommendation:")
 
 # Input fields
-age = st.slider("Age", 40, 70, 50)
+age = st.slider("Age", 18, 80, 50)
 gender = st.selectbox("Gender", ["Male", "Female"])
 bmi = st.slider("BMI", 15.0, 40.0, 28.0)
 sleep = st.slider("Average Sleep (hours)", 4.0, 10.0, 7.0)
