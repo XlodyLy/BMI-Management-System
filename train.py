@@ -38,6 +38,7 @@ def main(args):
             "MlpPolicy",
             env,
             verbose=1,
+            tensorboard_log="./logs/",
             learning_rate=1e-4,           # lower LR = more stable
             batch_size=64,
             n_steps=512,

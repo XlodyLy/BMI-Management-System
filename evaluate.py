@@ -1,16 +1,20 @@
 import argparse
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from bmi_env.env import BMIMgmtEnv
+
+# Add this import (so we can quit pygame after use)
+import pygame
 
 np.set_printoptions(precision=2, suppress=True)
 
 # Define labels for each state dimension (based on dataset columns)
 STATE_LABELS = [
-    "Age", "Gender", "BMI", "Calories", "Sleep Hours",
-    "Alcohol", "Smoking", "Blood Pressure", "Fitness Level",
-    "Family History", "Activity Type"
+    "Age", "Gender", "BMI", "Daily Steps", "Sleep Hours",
+    "Stress", "Activity Type", "Systolic BP", "Diastolic BP",
+    "Smoking", "Fitness Level"
 ]
 
 def pretty_state(state):
@@ -29,12 +33,15 @@ def evaluate(model_path: str, csv_path: str = "dataset.csv", episodes: int = 10,
     all_rewards = []
     success_count = 0
     final_states = []
+    bmi_trajectories = []
+    action_counts = np.zeros(env.action_space.n, dtype=int)
 
     for ep in range(episodes):
         obs, _ = env.reset()
         done, truncated = False, False
         total_reward = 0.0
         step_count = 0
+        bmi_traj = []
 
         print(f"\n=== Episode {ep+1} ===")
 
@@ -44,14 +51,19 @@ def evaluate(model_path: str, csv_path: str = "dataset.csv", episodes: int = 10,
             total_reward += reward
             step_count += 1
 
+            # Track BMI and actions
+            bmi_traj.append(obs[2])  # BMI is index 2
+            action_counts[action] += 1
+
             # Print state per step in a readable format
             print(f"Day {step_count} | State: {pretty_state(obs)}")
 
             if render:
-                env.render()
+                env.render()  # will open pygame window
 
         all_rewards.append(total_reward)
         final_states.append(obs)
+        bmi_trajectories.append(bmi_traj)
 
         if "is_success" in info and info["is_success"]:
             success_count += 1
@@ -66,6 +78,43 @@ def evaluate(model_path: str, csv_path: str = "dataset.csv", episodes: int = 10,
     print(f"Average Reward (Reward Rate): {avg_reward:.2f}")
     print(f"Success Rate: {success_rate * 100:.1f}% ({success_count}/{episodes})")
     print("Average Final State:", pretty_state(avg_final_state))
+
+    # -----------------------
+    # Visualization Section
+    # -----------------------
+
+    # Plot reward per episode
+    plt.figure(figsize=(8, 4))
+    plt.plot(all_rewards, marker="o")
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.title("Reward per Episode")
+    plt.grid(True)
+    plt.show()
+
+    # Plot BMI trajectories
+    plt.figure(figsize=(10, 5))
+    for i, traj in enumerate(bmi_trajectories):
+        plt.plot(traj, label=f"Ep {i+1}")
+    plt.xlabel("Day")
+    plt.ylabel("BMI")
+    plt.title("BMI Trajectories Across Episodes")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # Plot action distribution
+    plt.figure(figsize=(8, 4))
+    plt.bar(range(len(action_counts)), action_counts)
+    plt.xlabel("Action")
+    plt.ylabel("Count")
+    plt.title("Action Distribution")
+    plt.show()
+
+    # ✅ Ensure pygame window closes after all episodes
+    if render:
+        pygame.quit()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

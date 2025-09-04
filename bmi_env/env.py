@@ -4,6 +4,13 @@ import numpy as np
 import pandas as pd
 import os
 
+# --- pygame import for visualization ---
+try:
+    import pygame
+except Exception:
+    pygame = None  # fallback if pygame not installed
+
+
 class BMIMgmtEnv(gym.Env):
     metadata = {"render_modes": []}
 
@@ -24,7 +31,6 @@ class BMIMgmtEnv(gym.Env):
         self.data = pd.read_csv(csv_path)
 
         # --- Light cleaning to prevent NaNs/infs later ---
-        # Ensure required columns exist
         required_cols = [
             "age","gender","bmi","daily_steps","hours_sleep","stress_level",
             "activity_type","blood_pressure_systolic","blood_pressure_diastolic",
@@ -45,7 +51,7 @@ class BMIMgmtEnv(gym.Env):
         unique_activities = {name: i for i, name in enumerate(self.data["activity_type"].unique())}
         self.data["activity_type"] = self.data["activity_type"].map(unique_activities)
 
-        # Coerce numeric columns and fill remaining NaNs with sensible medians
+        # Coerce numeric columns and fill remaining NaNs
         num_cols = [
             "age","bmi","daily_steps","hours_sleep","stress_level",
             "activity_type","blood_pressure_systolic","blood_pressure_diastolic",
@@ -55,9 +61,7 @@ class BMIMgmtEnv(gym.Env):
             self.data[c] = pd.to_numeric(self.data[c], errors="coerce")
         self.data[num_cols] = self.data[num_cols].fillna(self.data[num_cols].median(numeric_only=True))
 
-        # Observation space:
-        # [age, gender, bmi, daily_steps, hours_sleep, stress_level,
-        #  activity_type, systolic_bp, diastolic_bp, smoking_status, fitness_level]
+        # Observation space
         n_act_vals = max(1, len(unique_activities))
         low = np.array([18, 0, 15.0, 0, 0, 0, 0, 80, 40, 0, 0], dtype=np.float32)
         high = np.array([80, 1, 45.0, 30000, 12, 10, n_act_vals - 1, 200, 120, 2, 5], dtype=np.float32)
@@ -72,6 +76,18 @@ class BMIMgmtEnv(gym.Env):
 
         self.state = None
         self.day = 0
+
+        # --- pygame / render state ---
+        self.window = None
+        self.clock = None
+        self.font = None
+        self.last_action = None
+        self.last_reward = 0.0
+        self.action_labels = [
+            "Walking", "Stretching", "Exercise",
+            "Portion Ctrl", "High-Volume Foods",
+            "Track Calories", "Sleep"
+        ]
 
     def seed(self, seed: int | None = None):
         self.rng = np.random.default_rng(seed)
@@ -92,7 +108,6 @@ class BMIMgmtEnv(gym.Env):
             row["fitness_level"]
         ], dtype=np.float32)
 
-        # Clip to space & replace non-finite
         obs = np.clip(obs, self.observation_space.low, self.observation_space.high)
         obs = np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
         return obs
@@ -108,11 +123,9 @@ class BMIMgmtEnv(gym.Env):
     def step(self, action: int):
         assert self.action_space.contains(action), "Invalid action."
 
-        # unpack state
         (age, gender, bmi, steps, sleep, stress,
          activity, sys_bp, dia_bp, smoking, fitness) = self.state
 
-        # Apply simple action effects
         if action == 0:   # walking
             steps += 1000
             bmi -= 0.02
@@ -133,61 +146,33 @@ class BMIMgmtEnv(gym.Env):
         elif action == 6: # sleep
             sleep = float(np.clip(float(sleep) + self.rng.normal(0.5, 0.2), 5.0, 10.0))
 
-        # Simulate small blood pressure drift
         sys_bp = float(np.clip(float(sys_bp) + self.rng.normal(0, 1), 90, 200))
         dia_bp = float(np.clip(float(dia_bp) + self.rng.normal(0, 1), 60, 120))
-
-        # Natural BMI drift
         bmi = float(np.clip(float(bmi) + self.rng.normal(0.0, 0.01), 15.0, 45.0))
-
-        # Fitness capped
         fitness = float(np.clip(float(fitness), 0.0, 5.0))
 
-        # New state
         self.state = np.array([
             age, gender, bmi, steps, sleep, stress,
             activity, sys_bp, dia_bp, smoking, fitness
         ], dtype=np.float32)
 
-        # Clip to observation bounds and sanitize
         self.state = np.clip(self.state, self.observation_space.low, self.observation_space.high)
         self.state = np.nan_to_num(self.state, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
         self.day += 1
 
-        # ------------------------
-        # Reward formula (UPDATED + clipped)
-        # ------------------------
         epsilon = 1e-6
-
-        # BMI component (target ~24)
         bmi_score = -abs(float(bmi) - 24.0) / (24.0 + epsilon)
-
-        # Activity component (scaled by activity index)
         denom_act = max(1.0, float(self.observation_space.high[6]))
         activity_score = float(activity) / denom_act
-
-        # Blood pressure component (ideal ~120/80)
         bp_sys_score = -((float(sys_bp) - 120.0) ** 2) / 1000.0
         bp_dia_score = -((float(dia_bp) - 80.0) ** 2) / 500.0
-
-        # Smoking component
-        # 0=Never, 1=Former, 2=Current
         smoking_score = -1.0 if int(smoking) == 2 else (-0.5 if int(smoking) == 1 else 0.5)
-
-        # Fitness component
         fitness_score = float(fitness) / 5.0
-
-        # Steps (scaled)
         steps_score = float(steps) / 30000.0
-
-        # Stress (penalty)
         stress_score = -0.1 * float(stress)
-
-        # Sleep bonus
         sleep_score = 0.5 if 7.0 <= float(sleep) <= 9.0 else 0.0
 
-        # Final weighted reward
         reward = (
             0.4 * bmi_score +
             0.15 * activity_score +
@@ -199,10 +184,13 @@ class BMIMgmtEnv(gym.Env):
             sleep_score
         )
 
-        # Clip reward to stabilize learning (prevents huge returns → NaNs)
         reward = float(np.clip(reward, -5.0, 5.0))
         if not np.isfinite(reward):
-            reward = 0.0  # last resort safety
+            reward = 0.0
+
+        # Remember for rendering
+        self.last_action = int(action)
+        self.last_reward = float(reward)
 
         terminated = bool((bmi < 18.0) or (bmi > 42.0))
         truncated = bool(self.day >= self.max_days)
@@ -211,12 +199,96 @@ class BMIMgmtEnv(gym.Env):
         if terminated or truncated:
             info["is_success"] = float(self.target_bmi_low <= float(bmi) <= self.target_bmi_high)
 
-        # Final safety assertions (helpful during debugging; cheap)
-        # Comment out if you prefer silent mode.
-        # assert np.all(np.isfinite(self.state)), f"Invalid obs: {self.state}"
-        # assert np.isfinite(reward), f"Invalid reward: {reward}"
-
         return self.state.copy(), reward, terminated, truncated, info
 
+    # --- Pygame rendering helpers ---
+    def _init_pygame(self):
+        if pygame is None:
+            return
+        if self.window is None:
+            pygame.init()
+            self.window = pygame.display.set_mode((900, 520))
+            pygame.display.set_caption("BMI Management — Agent Viewer")
+            self.clock = pygame.time.Clock()
+            self.font = pygame.font.SysFont("consolas", 20)
+
+    def _draw_text(self, surface, text, x, y, color=(230, 230, 230)):
+        if self.font is None:
+            return
+        img = self.font.render(str(text), True, color)
+        surface.blit(img, (x, y))
+
+    def _draw_bar(self, surface, x, y, w, h, value, vmin, vmax, label, good_range=None):
+        pygame.draw.rect(surface, (60, 60, 70), (x, y, w, h), border_radius=8)
+        pct = 0.0 if vmax <= vmin else max(0.0, min(1.0, (float(value) - vmin) / (vmax - vmin)))
+        color = (120, 190, 120)
+        if good_range:
+            low, high = good_range
+            if not (low <= float(value) <= high):
+                color = (200, 110, 110)
+        pygame.draw.rect(surface, color, (x, y, int(w * pct), h), border_radius=8)
+        self._draw_text(surface, f"{label}: {value:.2f}", x + 8, y + h + 6)
+
     def render(self):
-        print(f"Day {self.day} | State: {self.state}")
+        if pygame is None:
+            print(f"Day {self.day} | State: {self.state} | "
+                  f"Action: {self.last_action} | Reward: {self.last_reward:.3f}")
+            return
+
+        self._init_pygame()
+        if self.window is None:
+            return
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.display.quit()
+                self.window = None
+                return
+
+        self.window.fill((24, 26, 30))
+
+        (age, gender, bmi, steps, sleep, stress,
+         activity, sys_bp, dia_bp, smoking, fitness) = self.state
+
+        header = f"Day {self.day} | Last Action: " \
+                 f"{(self.action_labels[self.last_action] if self.last_action is not None else '—')} | " \
+                 f"Last Reward: {self.last_reward:+.3f}"
+        self._draw_text(self.window, header, 20, 16, color=(200, 220, 255))
+
+        x0, y0, w, h, gap = 20, 60, 520, 22, 40
+        y = y0
+
+        self._draw_bar(self.window, x0, y, w, h, bmi, 15.0, 45.0, "BMI",
+                       good_range=(self.target_bmi_low, self.target_bmi_high))
+        y += gap
+        self._draw_bar(self.window, x0, y, w, h, steps, 0, 30000, "Daily Steps"); y += gap
+        self._draw_bar(self.window, x0, y, w, h, sleep, 0.0, 12.0, "Sleep Hours", good_range=(7.0, 9.0)); y += gap
+        self._draw_bar(self.window, x0, y, w, h, stress, 0.0, 10.0, "Stress Level", good_range=(0.0, 3.0)); y += gap
+        self._draw_bar(self.window, x0, y, w, h, fitness, 0.0, 5.0, "Fitness Level"); y += gap
+        self._draw_bar(self.window, x0, y, w, h, sys_bp, 80.0, 200.0, "Systolic BP", good_range=(110.0, 130.0)); y += gap
+        self._draw_bar(self.window, x0, y, w, h, dia_bp, 40.0, 120.0, "Diastolic BP", good_range=(70.0, 90.0))
+
+        sx, sy = 580, 80
+        self._draw_text(self.window, f"Age: {int(age)}", sx, sy); sy += 28
+        self._draw_text(self.window, f"Gender: {'M' if int(gender)==1 else 'F'}", sx, sy); sy += 28
+        self._draw_text(self.window, f"Activity Type: {int(activity)}", sx, sy); sy += 28
+        self._draw_text(self.window, f"Smoking: {['Never','Former','Current'][int(smoking)]}", sx, sy); sy += 28
+        sy += 10
+        self._draw_text(self.window, f"Target BMI: {self.target_bmi_low:.1f}–{self.target_bmi_high:.1f}", sx, sy); sy += 28
+        in_target = (self.target_bmi_low <= float(bmi) <= self.target_bmi_high)
+        status = "IN RANGE ✅" if in_target else "OUT OF RANGE ❌"
+        self._draw_text(self.window, f"Status: {status}", sx, sy)
+
+        pygame.display.flip()
+        self.clock.tick(30)
+
+    def close(self):
+        if pygame is not None:
+            try:
+                pygame.display.quit()
+                pygame.quit()
+            except Exception:
+                pass
+        self.window = None
+        self.clock = None
+        self.font = None
