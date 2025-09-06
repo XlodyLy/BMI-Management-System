@@ -3,6 +3,8 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 import os
+import torch
+
 
 # --- pygame import for visualization ---
 try:
@@ -19,9 +21,12 @@ class BMIMgmtEnv(gym.Env):
                  max_days: int = 56,
                  target_bmi_low: float = 22.0,
                  target_bmi_high: float = 27.0,
-                 seed: int | None = None):
+                 seed: int | None = None,
+                 reward_mode: str = "additive"):   # <-- NEW
         super().__init__()
         self.rng = np.random.default_rng(seed)
+
+        self.reward_mode = reward_mode  # <-- NEW
 
         # Resolve path relative to project root
         if not os.path.isabs(csv_path):
@@ -173,16 +178,30 @@ class BMIMgmtEnv(gym.Env):
         stress_score = -0.1 * float(stress)
         sleep_score = 0.5 if 7.0 <= float(sleep) <= 9.0 else 0.0
 
-        reward = (
-            0.4 * bmi_score +
-            0.15 * activity_score +
-            0.15 * (bp_sys_score + bp_dia_score) +
-            0.1 * fitness_score +
-            0.1 * steps_score +
-            0.05 * smoking_score +
-            0.05 * stress_score +
-            sleep_score
-        )
+        # --- Reward function based on mode ---
+        if self.reward_mode == "additive":
+            reward = (
+                0.4 * bmi_score +
+                0.15 * activity_score +
+                0.15 * (bp_sys_score + bp_dia_score) +
+                0.1 * fitness_score +
+                0.1 * steps_score +
+                0.05 * smoking_score +
+                0.05 * stress_score +
+                sleep_score
+            )
+        elif self.reward_mode == "multiplicative":
+            base = (
+                0.4 * bmi_score +
+                0.15 * activity_score +
+                0.15 * (bp_sys_score + bp_dia_score) +
+                0.1 * fitness_score +
+                0.1 * steps_score
+            )
+            penalty = (0.05 * smoking_score) + (0.05 * stress_score) + sleep_score
+            reward = base * (1.0 + penalty)
+        else:
+            reward = 0.0
 
         reward = float(np.clip(reward, -5.0, 5.0))
         if not np.isfinite(reward):
@@ -232,7 +251,7 @@ class BMIMgmtEnv(gym.Env):
     def render(self):
         if pygame is None:
             print(f"Day {self.day} | State: {self.state} | "
-                f"Action: {self.last_action} | Reward: {self.last_reward:.3f}")
+                  f"Action: {self.last_action} | Reward: {self.last_reward:.3f}")
             return
 
         self._init_pygame()
@@ -245,52 +264,21 @@ class BMIMgmtEnv(gym.Env):
                 self.window = None
                 return
 
-        # Background
         self.window.fill((24, 26, 30))
 
-        # --- Unpack state ---
         (age, gender, bmi, steps, sleep, stress,
-        activity, sys_bp, dia_bp, smoking, fitness) = self.state
+         activity, sys_bp, dia_bp, smoking, fitness) = self.state
 
-        # --- Header ---
         header = f"Day {self.day} | Last Action: " \
-                f"{(self.action_labels[self.last_action] if self.last_action is not None else '—')} | " \
-                f"Last Reward: {self.last_reward:+.3f}"
+                 f"{(self.action_labels[self.last_action] if self.last_action is not None else '—')} | " \
+                 f"Last Reward: {self.last_reward:+.3f}"
         self._draw_text(self.window, header, 20, 16, color=(200, 220, 255))
 
-        # --- Avatar visualization (BMI → size of character) ---
-        # Map BMI to avatar size
-        radius = max(15, min(60, int(bmi)))  # clamp between 15–60 px
-        avatar_x, avatar_y = 700, 200
-
-        # Draw body (circle)
-        pygame.draw.circle(self.window, (0, 180, 255), (avatar_x, avatar_y), radius)
-
-        # Draw face (smiley/frown depending on stress)
-        eye_offset = int(radius * 0.4)
-        eye_y = avatar_y - int(radius * 0.3)
-        pygame.draw.circle(self.window, (0, 0, 0), (avatar_x - eye_offset, eye_y), 5)
-        pygame.draw.circle(self.window, (0, 0, 0), (avatar_x + eye_offset, eye_y), 5)
-
-        # Mouth (happy if stress < 5, sad otherwise)
-        mouth_y = avatar_y + int(radius * 0.3)
-        if stress < 5:
-            pygame.draw.arc(self.window, (0, 0, 0),
-                            (avatar_x - int(radius * 0.6), mouth_y - 10,
-                            int(radius * 1.2), 20),
-                            3.14, 0, 2)  # smile
-        else:
-            pygame.draw.arc(self.window, (0, 0, 0),
-                            (avatar_x - int(radius * 0.6), mouth_y,
-                            int(radius * 1.2), 20),
-                            0, 3.14, 2)  # frown
-
-        # --- Bars (keep your existing health indicators) ---
         x0, y0, w, h, gap = 20, 60, 520, 22, 40
         y = y0
 
         self._draw_bar(self.window, x0, y, w, h, bmi, 15.0, 45.0, "BMI",
-                    good_range=(self.target_bmi_low, self.target_bmi_high))
+                       good_range=(self.target_bmi_low, self.target_bmi_high))
         y += gap
         self._draw_bar(self.window, x0, y, w, h, steps, 0, 30000, "Daily Steps"); y += gap
         self._draw_bar(self.window, x0, y, w, h, sleep, 0.0, 12.0, "Sleep Hours", good_range=(7.0, 9.0)); y += gap
@@ -299,8 +287,7 @@ class BMIMgmtEnv(gym.Env):
         self._draw_bar(self.window, x0, y, w, h, sys_bp, 80.0, 200.0, "Systolic BP", good_range=(110.0, 130.0)); y += gap
         self._draw_bar(self.window, x0, y, w, h, dia_bp, 40.0, 120.0, "Diastolic BP", good_range=(70.0, 90.0))
 
-        # --- Side info text ---
-        sx, sy = 580, 350
+        sx, sy = 580, 80
         self._draw_text(self.window, f"Age: {int(age)}", sx, sy); sy += 28
         self._draw_text(self.window, f"Gender: {'M' if int(gender)==1 else 'F'}", sx, sy); sy += 28
         self._draw_text(self.window, f"Activity Type: {int(activity)}", sx, sy); sy += 28
@@ -311,10 +298,8 @@ class BMIMgmtEnv(gym.Env):
         status = "IN RANGE ✅" if in_target else "OUT OF RANGE ❌"
         self._draw_text(self.window, f"Status: {status}", sx, sy)
 
-        # --- Update window ---
         pygame.display.flip()
         self.clock.tick(30)
-
 
     def close(self):
         if pygame is not None:
