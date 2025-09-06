@@ -8,7 +8,6 @@ from bmi_env.env import BMIMgmtEnv
 from tqdm import trange
 import torch
 
-
 import pygame
 
 np.set_printoptions(precision=2, suppress=True)
@@ -43,8 +42,7 @@ def plot_rewards(all_rewards, save_path=None):
     plt.grid(True)
     if save_path:
         plt.savefig(os.path.join(save_path, "reward_per_episode.png"))
-    else:
-        plt.show()
+    plt.show()  # force display
 
 def plot_bmi_trajectories(bmi_trajectories, save_path=None):
     plt.figure(figsize=(10, 5))
@@ -57,8 +55,7 @@ def plot_bmi_trajectories(bmi_trajectories, save_path=None):
     plt.grid(True)
     if save_path:
         plt.savefig(os.path.join(save_path, "bmi_trajectories.png"))
-    else:
-        plt.show()
+    plt.show()  # force display
 
 def plot_action_distribution(action_counts, save_path=None):
     plt.figure(figsize=(8, 4))
@@ -68,8 +65,7 @@ def plot_action_distribution(action_counts, save_path=None):
     plt.title("Action Distribution")
     if save_path:
         plt.savefig(os.path.join(save_path, "action_distribution.png"))
-    else:
-        plt.show()
+    plt.show()  # force display
 
 # -------------------------------
 # Evaluation
@@ -180,6 +176,7 @@ def evaluate(model_path: str,
         save_path = os.path.dirname(model_path)
         os.makedirs(save_path, exist_ok=True)
 
+    # Always show the plots
     plot_rewards(all_rewards, save_path)
     plot_bmi_trajectories(bmi_trajectories, save_path)
     plot_action_distribution(action_counts, save_path)

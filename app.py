@@ -233,14 +233,14 @@ def generate_full_plan(action, state_dict):
         plan["notes"].append("High resting heart rate — monitor closely.")
     if dia_bp > 90:
         plan["notes"].append("Elevated diastolic pressure — consult physician.")
-    plan["notes"].append(f"Agent main focus: {main_focus}")
+    
 
     return plan
 
 # ---------- Streamlit App ----------
-st.set_page_config(page_title="BMI Management Platform", layout="wide")
-st.title("🏥 Intelligent BMI Management Platform")
-st.write("Register / login, log your day, and get a personalized plan (RL + heuristics).")
+st.set_page_config(page_title="BMI Management Platform ", layout="wide")
+st.title("🏥 Intelligent BMI Management Platform For Heart Patients")
+st.write("Register / login, log your day, and get a personalized plan")
 
 init_db()
 model, venv = safe_load_model()
